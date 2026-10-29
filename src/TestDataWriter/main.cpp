@@ -266,6 +266,14 @@ int main(int argc, char** argv) {
             f.tick(210000000, 10, 100, 1003, 20261029, 20261030);
             equal(f.bars().back().vol, 10, "new trading day opening volume");
         });
+        isolated("minimal snapshot mode keeps legacy gap behavior", [&] {
+            Fixture f(root + "/minimal");
+            f.tick(134103000, 100, 1000, 1100, 20261029, 20261029, 2);
+            f.tick(134110000, 105, 1050, 1101, 20261029, 20261029, 2);
+            f.tick(134430000, 500, 5000, 1200, 20261029, 20261029, 2);
+            equal(f.bars().back().vol, 395, "non-cumulative-mode compatibility");
+            require(!f.sink.logged("Cumulative recovery gap"), "policy applied outside procFlag 1");
+        });
         std::cout << "All " << passedCases << " DataWriter regression cases passed." << std::endl;
         return 0;
     } catch (const std::exception& ex) {

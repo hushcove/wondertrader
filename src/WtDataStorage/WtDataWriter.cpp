@@ -1541,7 +1541,7 @@ bool WtDataWriter::updateCache(WTSContractInfo* ct, WTSTickData* curTick, uint32
 		else
 		{
 			int64_t gapMillis = 0;
-			if (_reset_cumulative_on_start && (firstSnapshot || _cumulative_gap_seconds > 0))
+			if (procFlag == 1 && _reset_cumulative_on_start && (firstSnapshot || _cumulative_gap_seconds > 0))
 			{
 				WTSSessionInfo* session = ct->getCommInfo()->getSessionInfo();
 				const uint32_t currentMinute = session->timeToMinutes(newTick.action_time / 100000, false);
@@ -1559,7 +1559,7 @@ bool WtDataWriter::updateCache(WTSContractInfo* ct, WTSTickData* curTick, uint32
 			}
 			const bool differentMinute = newTick.action_date != item._tick.action_date
 				|| newTick.action_time / 100000 != item._tick.action_time / 100000;
-			const bool recoveryGap = _reset_cumulative_on_start &&
+			const bool recoveryGap = procFlag == 1 && _reset_cumulative_on_start &&
 				((firstSnapshot && differentMinute && gapMillis > 0) || (_cumulative_gap_seconds > 0
 					&& gapMillis > (int64_t)_cumulative_gap_seconds * 1000));
 			newTick.volume = newTick.total_volume - item._tick.total_volume;
