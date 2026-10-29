@@ -92,6 +92,8 @@ WtDataWriter::WtDataWriter()
 	, _disable_his(false)
 	, _skip_notrade_tick(false)
 	, _skip_notrade_bar(false)
+	, _reset_cumulative_on_start(false)
+	, _cumulative_gap_seconds(0)
 {
 }
 
@@ -133,6 +135,10 @@ bool WtDataWriter::init(WTSVariant* params, IDataWriterSink* sink)
 	// 如果一个bar内没有一个有成交的tick，则不会有这个bar，参考掘金,MC
 	_skip_notrade_bar = params->getBoolean("skip_notrade_bar");
 
+	// Opt-in conservative handling of cumulative snapshots on startup/recovery.
+	_reset_cumulative_on_start = params->getBoolean("reset_cumulative_on_start");
+	_cumulative_gap_seconds = params->getUInt32("cumulative_gap_seconds");
+
 	//禁用历史数据
 	_disable_his = params->getBoolean("disablehis");
 
@@ -164,9 +170,9 @@ bool WtDataWriter::init(WTSVariant* params, IDataWriterSink* sink)
 	_proc_chk.reset(new StdThread(boost::bind(&WtDataWriter::check_loop, this)));
 
 	pipe_writer_log(sink, LL_INFO, "WtDataWriter initialized, root dir: {}, save_csv_tick: {}, async_mode: {}, log_group_size: {}, disable_history: {}, "
-		"disable_tick: {}, disable_min1: {}, disable_min5: {}, disable_day: {}, disable_trans: {}, disable_ordque: {}, disable_orders: {}, min_price_mode: {}", 
+		"disable_tick: {}, disable_min1: {}, disable_min5: {}, disable_day: {}, disable_trans: {}, disable_ordque: {}, disable_orders: {}, min_price_mode: {}, reset_cumulative_on_start: {}, cumulative_gap_seconds: {}",
 		_base_dir, _save_tick_log, _async_proc, _log_group_size, _disable_his, _disable_tick, 
-		_disable_min1, _disable_min5, _disable_day, _disable_trans, _disable_ordque, _disable_orddtl, _min_price_mode);
+		_disable_min1, _disable_min5, _disable_day, _disable_trans, _disable_ordque, _disable_orddtl, _min_price_mode, _reset_cumulative_on_start, _cumulative_gap_seconds);
 	return true;
 }
 
@@ -1468,22 +1474,31 @@ bool WtDataWriter::updateCache(WTSContractInfo* ct, WTSTickData* curTick, uint32
 	}
 
 	WTSTickStruct& newTick = curTick->getTickStruct();
+	const bool firstSnapshot = _cumulative_started.find(key) == _cumulative_started.end();
 
 	if (curTick->tradingdate() > item._date)
 	{
 		//新数据交易日大于老数据,则认为是新一天的数据
 		item._date = curTick->tradingdate();
-		memcpy(&item._tick, &newTick, sizeof(WTSTickStruct));
 		if (procFlag==1)
 		{
-			item._tick.volume = item._tick.total_volume;
-			item._tick.turn_over = item._tick.total_turnover;
-			item._tick.diff_interest = item._tick.open_interest - item._tick.pre_interest;
-
-			newTick.volume = newTick.total_volume;
-			newTick.turn_over = newTick.total_turnover;
-			newTick.diff_interest = newTick.open_interest - newTick.pre_interest;
+			WTSSessionInfo* session = ct->getCommInfo()->getSessionInfo();
+			// Only the first trading minute (including its opening auction) can
+			// legitimately contain the full trading-day cumulative values.
+			const bool openingMinute = session && session->timeToMinutes(newTick.action_time / 100000, false) == 0;
+			const bool baselineOnly = _reset_cumulative_on_start && !openingMinute;
+			newTick.volume = baselineOnly ? 0 : newTick.total_volume;
+			newTick.turn_over = baselineOnly ? 0 : newTick.total_turnover;
+			newTick.diff_interest = baselineOnly ? 0 : newTick.open_interest - newTick.pre_interest;
+			if (baselineOnly)
+			{
+				pipe_writer_log(_sink, LL_WARN,
+					"Cumulative baseline initialized for {}.{} at {}.{}: excluded volume {}, turnover {}; current minute is partial",
+					curTick->exchg(), curTick->code(), newTick.action_date, newTick.action_time,
+					newTick.total_volume, newTick.total_turnover);
+			}
 		}
+		memcpy(&item._tick, &newTick, sizeof(WTSTickStruct));
 
 		//	newTick.trading_date, curTick->exchg(), curTick->code(), curTick->volume(),
 		//	curTick->turnover(), curTick->openinterest(), curTick->additional());
@@ -1525,9 +1540,43 @@ bool WtDataWriter::updateCache(WTSContractInfo* ct, WTSTickData* curTick, uint32
 		}
 		else
 		{
+			int64_t gapMillis = 0;
+			if (_reset_cumulative_on_start && (firstSnapshot || _cumulative_gap_seconds > 0))
+			{
+				WTSSessionInfo* session = ct->getCommInfo()->getSessionInfo();
+				const uint32_t currentMinute = session->timeToMinutes(newTick.action_time / 100000, false);
+				const uint32_t previousMinute = session->timeToMinutes(item._tick.action_time / 100000, false);
+				if (currentMinute != INVALID_UINT32 && previousMinute != INVALID_UINT32 && currentMinute >= previousMinute)
+				{
+					// Measure trading time, so scheduled lunch/session breaks do not
+					// discard legitimate volume from the first quote after reopening.
+					gapMillis = (int64_t)(currentMinute - previousMinute) * 60000
+						+ newTick.action_time % 100000 - item._tick.action_time % 100000;
+				}
+				else
+					gapMillis = TimeUtils::makeTime(newTick.action_date, newTick.action_time)
+						- TimeUtils::makeTime(item._tick.action_date, item._tick.action_time);
+			}
+			const bool differentMinute = newTick.action_date != item._tick.action_date
+				|| newTick.action_time / 100000 != item._tick.action_time / 100000;
+			const bool recoveryGap = _reset_cumulative_on_start &&
+				((firstSnapshot && differentMinute && gapMillis > 0) || (_cumulative_gap_seconds > 0
+					&& gapMillis > (int64_t)_cumulative_gap_seconds * 1000));
 			newTick.volume = newTick.total_volume - item._tick.total_volume;
 			newTick.turn_over = newTick.total_turnover - item._tick.total_turnover;
 			newTick.diff_interest = newTick.open_interest - item._tick.open_interest;
+			if (recoveryGap)
+			{
+				pipe_writer_log(_sink, LL_WARN,
+					"Cumulative recovery gap for {}.{} from {}.{} to {}.{}: unallocated volume {}, turnover {}, interest change {}; current minute is partial",
+					curTick->exchg(), curTick->code(), item._tick.action_date, item._tick.action_time,
+					newTick.action_date, newTick.action_time, newTick.volume, newTick.turn_over, newTick.diff_interest);
+				// The missing interval cannot be assigned to this single minute.
+				// Zero means unmeasured here; the warning must be retained as a quality record.
+				newTick.volume = 0;
+				newTick.turn_over = 0;
+				newTick.diff_interest = 0;
+			}
 
 			memcpy(&item._tick, &newTick, sizeof(WTSTickStruct));
 		}
@@ -1535,6 +1584,8 @@ bool WtDataWriter::updateCache(WTSContractInfo* ct, WTSTickData* curTick, uint32
 		//pipe_writer_log(_sink, LL_DEBUG, "Tick cache data updated {}[{}.{}]", newTick.code, newTick.action_date, newTick.action_time);
 	}
 
+	if (procFlag == 1)
+		_cumulative_started.insert(key);
 	return true;
 }
 

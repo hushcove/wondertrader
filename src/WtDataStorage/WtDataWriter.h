@@ -200,6 +200,9 @@ private:
 	bool			_save_tick_log;
 	bool			_skip_notrade_tick;
 	bool			_skip_notrade_bar;
+	bool			_reset_cumulative_on_start;
+	uint32_t		_cumulative_gap_seconds;
+	wt_hashset<std::string> _cumulative_started;
 	bool			_disable_his;
 
 	bool			_disable_tick;

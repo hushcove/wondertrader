@@ -123,3 +123,7 @@ ADD_SUBDIRECTORY(TestTrader)
 ADD_SUBDIRECTORY(TestParser)
 ADD_SUBDIRECTORY(TestUnits)
 
+# Offline DataWriter regression tests use POSIX process isolation.
+IF(UNIX AND NOT WIN32)
+    ADD_SUBDIRECTORY(TestDataWriter)
+ENDIF()

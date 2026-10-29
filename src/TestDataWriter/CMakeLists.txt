@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.0.0)
+project(TestDataWriter LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+include_directories(${INCS})
+link_directories(${LNKS})
+set(EXECUTABLE_OUTPUT_PATH ${CMAKE_BINARY_DIR}/build_${PLATFORM}/${CMAKE_BUILD_TYPE}/bin/TestDataWriter)
+add_executable(TestDataWriter main.cpp)
+target_link_libraries(TestDataWriter WtDataStorage WTSUtils boost_filesystem pthread dl)
